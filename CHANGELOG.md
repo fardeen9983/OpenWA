@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Patched a high-severity `ws` advisory (and a moderate `qs` DoS) on the live socket.io transport by
-  bumping in-range transitive deps (`engine.io`/`ws`→8.21.0, `qs`→6.15.2) via `npm audit fix` in both
-  the API and dashboard. Lockfile-only — no `package.json`/API change. The remaining advisories are
-  build-only (`sqlite3`→`node-gyp`→`tar`) and require a breaking `sqlite3` major, deferred.
+  bumping in-range deps (`ws`→8.21.0, `engine.io`→6.6.9, `qs`→6.15.2, plus the incidental
+  re-resolutions `npm audit fix` pulled in) in both the API and dashboard. Lockfile-only — no
+  `package.json`/API change. The remaining advisories are build-only (`sqlite3`→`node-gyp`→`tar`)
+  and require a breaking `sqlite3` major, deferred.
 
 ## [0.2.8] - 2026-06-17
 
