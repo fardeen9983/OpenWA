@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Logger } from '@nestjs/common';
+import { HttpException, Logger } from '@nestjs/common';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 const logger = new Logger('Mcp');
@@ -36,14 +36,21 @@ export function jsonToolResult(data: object, isError = false): CallToolResult {
 
 /**
  * Map a thrown error to a tool-error result. Stack traces and raw thrown values
- * are logged server-side only - never put on the wire, where they would leak
+ * are logged server-side only — never put on the wire, where they would leak
  * server internals to the MCP client.
+ *
+ * HttpExceptions carry client-safe messages (they mirror REST error responses).
+ * All other errors get a generic wire message to avoid leaking internals.
  */
 export function handleToolError(error: unknown): CallToolResult {
-  if (error instanceof Error) {
+  if (error instanceof HttpException) {
     logger.error(error.message, error.stack);
     return jsonToolResult({ success: false, name: error.name, message: error.message }, true);
   }
+  if (error instanceof Error) {
+    logger.error(error.message, error.stack);
+    return jsonToolResult({ success: false, name: error.name, message: 'Internal error' }, true);
+  }
   logger.error('Unknown tool error', String(error));
-  return jsonToolResult({ success: false, name: 'Unknown error', message: 'An unknown error occurred' }, true);
+  return jsonToolResult({ success: false, name: 'Unknown error', message: 'Internal error' }, true);
 }
