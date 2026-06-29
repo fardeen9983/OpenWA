@@ -23,6 +23,7 @@ class FakeSock extends EventEmitter {
   public end = jest.fn();
   public logout = jest.fn().mockResolvedValue(undefined);
   public sendMessage = jest.fn();
+  public relayMessage = jest.fn().mockResolvedValue('BTN1');
   public onWhatsApp = jest.fn();
   public sendPresenceUpdate = jest.fn().mockResolvedValue(undefined);
   public groupFetchAllParticipating = jest.fn();
@@ -48,10 +49,12 @@ class FakeSock extends EventEmitter {
 
 const fakeSock = new FakeSock();
 const saveCreds = jest.fn().mockResolvedValue(undefined);
+let mockSocketOptions: unknown;
 
 jest.mock('@whiskeysockets/baileys', () => ({
   __esModule: true,
-  default: jest.fn(() => {
+  default: jest.fn((options: unknown) => {
+    mockSocketOptions = options;
     fakeSock.resetEmitter();
     return fakeSock;
   }),
@@ -68,11 +71,17 @@ jest.mock('@whiskeysockets/baileys', () => ({
       },
     }),
   ),
+  generateWAMessageFromContent: jest.fn((jid: string, message: unknown) => ({
+    key: { id: 'BTN1', remoteJid: jid, fromMe: true },
+    message,
+    messageTimestamp: 1700000006,
+  })),
   // Identity passthrough by default; individual tests may override to simulate unwrapping.
   normalizeMessageContent: jest.fn((c: unknown) => c),
   DisconnectReason: { loggedOut: 401, restartRequired: 515 },
   proto: {
     Message: {
+      fromObject: jest.fn((message: unknown) => message),
       ProtocolMessage: {
         Type: { REVOKE: 0 },
       },
@@ -81,7 +90,7 @@ jest.mock('@whiskeysockets/baileys', () => ({
 }));
 
 import { BaileysAdapter } from './baileys.adapter';
-import { EngineStatus, EngineEventCallbacks } from '../interfaces/whatsapp-engine.interface';
+import { EngineStatus, EngineEventCallbacks, IncomingMessage } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
@@ -557,7 +566,11 @@ describe('BaileysAdapter messaging', () => {
     fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT1' }, messageTimestamp: 1700000001 });
     const adapter = await readyAdapter();
     const res = await adapter.sendTextMessage('628111@s.whatsapp.net', 'hello');
-    expect(fakeSock.sendMessage).toHaveBeenCalledWith('628111@s.whatsapp.net', { text: 'hello' });
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith(
+      '628111@s.whatsapp.net',
+      { text: 'hello' },
+      { useUserDevicesCache: false },
+    );
     expect(res).toEqual({ id: 'OUT1', timestamp: 1700000001 });
   });
 
@@ -569,7 +582,7 @@ describe('BaileysAdapter messaging', () => {
     expect(fakeSock.sendMessage).toHaveBeenCalledWith(
       '628111@s.whatsapp.net',
       { text: 'hello' },
-      { ephemeralExpiration: 604800 },
+      { ephemeralExpiration: 604800, useUserDevicesCache: false },
     );
   });
 
@@ -577,17 +590,97 @@ describe('BaileysAdapter messaging', () => {
     fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT1' }, messageTimestamp: 1700000001 });
     const adapter = await readyAdapter();
     await adapter.sendTextMessage('120@g.us', 'hi @62811', ['62811@c.us']);
-    expect(fakeSock.sendMessage).toHaveBeenCalledWith('120@g.us', {
-      text: 'hi @62811',
-      mentions: ['62811@s.whatsapp.net'],
-    });
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith(
+      '120@g.us',
+      {
+        text: 'hi @62811',
+        mentions: ['62811@s.whatsapp.net'],
+      },
+      { useUserDevicesCache: false },
+    );
   });
 
   it('sendTextMessage omits the mentions key when none are given (no behavior change)', async () => {
     fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT1' }, messageTimestamp: 1700000001 });
     const adapter = await readyAdapter();
     await adapter.sendTextMessage('120@g.us', 'plain', []);
-    expect(fakeSock.sendMessage).toHaveBeenCalledWith('120@g.us', { text: 'plain' });
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith('120@g.us', { text: 'plain' }, { useUserDevicesCache: false });
+  });
+
+  it('sendTextMessage converts neutral @c.us ids to Baileys @s.whatsapp.net ids', async () => {
+    fakeSock.sendMessage.mockResolvedValue({ key: { id: 'OUT2' }, messageTimestamp: 1700000002 });
+    const adapter = await readyAdapter();
+    await adapter.sendTextMessage('917069567007@c.us', 'hello');
+    expect(fakeSock.sendMessage).toHaveBeenCalledWith(
+      '917069567007@s.whatsapp.net',
+      { text: 'hello' },
+      { useUserDevicesCache: false },
+    );
+  });
+
+  it('sendButtonMessage sends a Baileys button payload and returns the message id', async () => {
+    const adapter = await readyAdapter();
+    const res = await adapter.sendButtonMessage('917069567007@c.us', {
+      text: 'Neha wants to connect with you',
+      footer: 'ContactBook',
+      buttons: [
+        { id: 'accept', title: 'Accept' },
+        { id: 'decline', title: 'Decline' },
+      ],
+    });
+
+    expect(fakeSock.sendMessage).not.toHaveBeenCalled();
+    expect(fakeSock.relayMessage).toHaveBeenCalledWith(
+      '917069567007@s.whatsapp.net',
+      {
+        viewOnceMessage: {
+          message: {
+            messageContextInfo: {
+              deviceListMetadata: {},
+              deviceListMetadataVersion: 2,
+            },
+            interactiveMessage: {
+              body: { text: 'Neha wants to connect with you' },
+              footer: { text: 'ContactBook' },
+              nativeFlowMessage: {
+                buttons: [
+                  { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Accept', id: 'accept' }) },
+                  { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Decline', id: 'decline' }) },
+                ],
+                messageVersion: 1,
+              },
+            },
+          },
+        },
+      },
+      { messageId: 'BTN1' },
+    );
+    expect(fakeStore.put).toHaveBeenCalledWith('sess-1', {
+      key: { id: 'BTN1', remoteJid: '917069567007@s.whatsapp.net', fromMe: true },
+      message: {
+        viewOnceMessage: {
+          message: {
+            messageContextInfo: {
+              deviceListMetadata: {},
+              deviceListMetadataVersion: 2,
+            },
+            interactiveMessage: {
+              body: { text: 'Neha wants to connect with you' },
+              footer: { text: 'ContactBook' },
+              nativeFlowMessage: {
+                buttons: [
+                  { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Accept', id: 'accept' }) },
+                  { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Decline', id: 'decline' }) },
+                ],
+                messageVersion: 1,
+              },
+            },
+          },
+        },
+      },
+      messageTimestamp: 1700000006,
+    });
+    expect(res).toEqual({ id: 'BTN1', timestamp: 1700000006 });
   });
 
   it('getNumberId resolves via onWhatsApp and returns a NEUTRAL jid (never @s.whatsapp.net)', async () => {
@@ -615,6 +708,9 @@ describe('BaileysAdapter messaging', () => {
     const adapter = newAdapter();
     await adapter.initialize({});
     await expect(adapter.sendTextMessage('x', 'y')).rejects.toBeInstanceOf(EngineNotReadyError);
+    await expect(
+      adapter.sendButtonMessage('x', { text: 'y', buttons: [{ id: 'a', title: 'A' }] }),
+    ).rejects.toBeInstanceOf(EngineNotReadyError);
     await expect(adapter.checkNumberExists('628111')).rejects.toBeInstanceOf(EngineNotReadyError);
     await expect(adapter.getNumberId('628111')).rejects.toBeInstanceOf(EngineNotReadyError);
     await expect(adapter.sendChatState('628111@s.whatsapp.net', 'typing')).rejects.toBeInstanceOf(EngineNotReadyError);
@@ -639,7 +735,10 @@ describe('BaileysAdapter inbound fan-out', () => {
   });
 
   it('routes an inbound (not fromMe) message to onMessage with a neutral shape', async () => {
-    const onMessage = jest.fn();
+    let received: IncomingMessage | undefined;
+    const onMessage = jest.fn((message: IncomingMessage) => {
+      received = message;
+    });
     const adapter = newAdapter();
     await adapter.initialize({ onMessage });
     fakeSock.fire('messages.upsert', {
@@ -655,9 +754,75 @@ describe('BaileysAdapter inbound fan-out', () => {
     });
     await new Promise(r => setImmediate(r));
     expect(onMessage).toHaveBeenCalledTimes(1);
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    const msg = onMessage.mock.calls[0][0] as { id: string; body: string; type: string; fromMe: boolean };
-    expect(msg).toMatchObject({ id: 'IN1', body: 'hi there', type: 'text', fromMe: false });
+    expect(received).toMatchObject({ id: 'IN1', body: 'hi there', type: 'text', fromMe: false });
+  });
+
+  it('normalizes an inbound buttons response with the selected id and title', async () => {
+    baileys.getContentType.mockReturnValue('buttonsResponseMessage');
+    let received: IncomingMessage | undefined;
+    const onMessage = jest.fn((message: IncomingMessage) => {
+      received = message;
+    });
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessage });
+    fakeSock.fire('messages.upsert', {
+      type: 'notify',
+      messages: [
+        {
+          key: { remoteJid: '917069567007@s.whatsapp.net', fromMe: false, id: 'BTN_REPLY_ACCEPT' },
+          message: {
+            buttonsResponseMessage: {
+              selectedButtonId: 'accept',
+              selectedDisplayText: 'Accept',
+            },
+          },
+          messageTimestamp: 1700000007,
+          pushName: 'Recipient',
+        },
+      ],
+    });
+    await new Promise(r => setImmediate(r));
+
+    expect(received).toMatchObject({
+      body: 'Accept',
+      type: 'text',
+      buttonReply: { id: 'accept', title: 'Accept' },
+    });
+  });
+
+  it('normalizes an inbound interactive decline response when Baileys emits native flow params', async () => {
+    baileys.getContentType.mockReturnValue('interactiveResponseMessage');
+    let received: IncomingMessage | undefined;
+    const onMessage = jest.fn((message: IncomingMessage) => {
+      received = message;
+    });
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessage });
+    fakeSock.fire('messages.upsert', {
+      type: 'notify',
+      messages: [
+        {
+          key: { remoteJid: '917069567007@s.whatsapp.net', fromMe: false, id: 'BTN_REPLY_DECLINE' },
+          message: {
+            interactiveResponseMessage: {
+              body: { text: 'Decline' },
+              nativeFlowResponseMessage: {
+                name: 'decline',
+                paramsJson: JSON.stringify({ id: 'decline', title: 'Decline' }),
+              },
+            },
+          },
+          messageTimestamp: 1700000008,
+        },
+      ],
+    });
+    await new Promise(r => setImmediate(r));
+
+    expect(received).toMatchObject({
+      body: 'Decline',
+      type: 'text',
+      buttonReply: { id: 'decline', title: 'Decline' },
+    });
   });
 
   it('canonicalizes an inbound message JID from @s.whatsapp.net to @c.us', async () => {
@@ -709,18 +874,16 @@ describe('BaileysAdapter inbound fan-out', () => {
     const onMessage = jest.fn();
     const adapter = newAdapter();
     await adapter.initialize({ onMessage });
-    // No history-sync mapping this time; the inbound key itself carries senderLid + senderPn,
-    // which is the only place a fresh @lid sender's number is revealed in baileys@6.7.23.
+    // No history-sync mapping this time; the v7 inbound key pairs the LID with its alternate PN JID.
     fakeSock.fire('messages.upsert', {
       type: 'notify',
       messages: [
         {
           key: {
             remoteJid: '111@lid',
+            remoteJidAlt: '628111@s.whatsapp.net',
             fromMe: false,
             id: 'IN_LID_KEY',
-            senderLid: '111@lid',
-            senderPn: '628111@s.whatsapp.net',
           },
           message: { conversation: 'hi from lid' },
           messageTimestamp: 1700000005,
@@ -730,7 +893,7 @@ describe('BaileysAdapter inbound fan-out', () => {
     await new Promise(r => setImmediate(r));
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const msg = onMessage.mock.calls[0][0] as { from: string; isLidSender?: boolean };
-    expect(msg.from).toBe('628111@c.us'); // resolved from the key's senderPn, neutral dialect
+    expect(msg.from).toBe('628111@c.us'); // resolved from remoteJidAlt, neutral dialect
     expect(msg.isLidSender).toBe(true);
   });
 
@@ -795,6 +958,36 @@ describe('BaileysAdapter inbound fan-out', () => {
     await adapter.initialize({ onMessageAck });
     fakeSock.fire('messages.update', [{ key: { id: 'OUT1' }, update: { status: 3 } }]);
     expect(onMessageAck).toHaveBeenCalledWith('OUT1', 'delivered');
+  });
+
+  it('emits a failed ack when Baileys reports an outbound ack error', async () => {
+    const onMessageAck = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessageAck });
+    (adapter as unknown as { handleAckError(attrs: { id: string; from: string; error: string }): void }).handleAckError(
+      {
+        id: 'OUT1',
+        from: '628111@s.whatsapp.net',
+        error: '463',
+      },
+    );
+    expect(onMessageAck).toHaveBeenCalledWith('OUT1', 'failed', { errorCode: '463' });
+  });
+
+  it('recognizes the Baileys v7 missing-tctoken warning as failure 463', async () => {
+    const onMessageAck = jest.fn();
+    const adapter = newAdapter();
+    await adapter.initialize({ onMessageAck });
+    const options = mockSocketOptions as {
+      logger: { warn: (value: Record<string, unknown>, message: string) => void };
+    };
+
+    options.logger.warn(
+      { msgId: 'OUT2', from: '628111@s.whatsapp.net' },
+      'error 463: account restricted or missing tctoken for contact',
+    );
+
+    expect(onMessageAck).toHaveBeenCalledWith('OUT2', 'failed', { errorCode: '463' });
   });
 
   it('inbound image: downloads media and exposes base64 + caption as body', async () => {

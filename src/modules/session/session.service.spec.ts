@@ -475,7 +475,7 @@ describe('SessionService', () => {
 
       await service.start('sess-uuid-1');
 
-      expect(engineFactory.create).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'test-session' }));
+      expect(engineFactory.create).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'sess-uuid-1' }));
       expect(mockEngine.initialize).toHaveBeenCalled();
       expect(repository.update).toHaveBeenCalledWith('sess-uuid-1', {
         status: SessionStatus.INITIALIZING,
@@ -972,6 +972,21 @@ describe('SessionService', () => {
         { status: MessageStatus.FAILED },
       );
       expect(dispatchedEvents('message.failed')).toHaveLength(1);
+    });
+
+    it('includes an engine failure code in ack and failed events when one is available', async () => {
+      const callbacks = await startAndCaptureCallbacks();
+
+      callbacks.onMessageAck!('wa-out-1', 'failed', { errorCode: '463' });
+      await flush();
+
+      expect(dispatchedEvents('message.ack')[0][2]).toEqual(expect.objectContaining({ errorCode: '463' }));
+      expect(dispatchedEvents('message.failed')[0][2]).toEqual(expect.objectContaining({ errorCode: '463' }));
+      expect(hookManager.execute).toHaveBeenCalledWith(
+        'message:ack',
+        expect.objectContaining({ errorCode: '463' }),
+        expect.anything(),
+      );
     });
 
     it('emits the message:ack hook for every ack so plugins (e.g. a delivery logger) can react', async () => {

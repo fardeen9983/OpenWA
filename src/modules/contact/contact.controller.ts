@@ -31,19 +31,6 @@ export class ContactController {
     });
   }
 
-  @Get(':contactId')
-  @ApiOperation({ summary: 'Get a specific contact by ID' })
-  @ApiParam({ name: 'sessionId', description: 'Session ID' })
-  @ApiParam({ name: 'contactId', description: 'Contact ID (e.g., 628xxx@c.us)' })
-  @ApiResponse({
-    status: 200,
-    description: 'Contact details',
-  })
-  @ApiResponse({ status: 404, description: 'Contact not found' })
-  async findOne(@Param('sessionId') sessionId: string, @Param('contactId') contactId: string) {
-    return this.contactService.getContactById(sessionId, contactId);
-  }
-
   @Get('check/:number')
   @ApiOperation({ summary: 'Check if a phone number exists on WhatsApp' })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
@@ -61,6 +48,19 @@ export class ContactController {
       exists: whatsappId !== null,
       whatsappId,
     };
+  }
+
+  @Get(':contactId')
+  @ApiOperation({ summary: 'Get a specific contact by ID' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'contactId', description: 'Contact ID (e.g., 628xxx@c.us)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Contact details',
+  })
+  @ApiResponse({ status: 404, description: 'Contact not found' })
+  async findOne(@Param('sessionId') sessionId: string, @Param('contactId') contactId: string) {
+    return this.contactService.getContactById(sessionId, contactId);
   }
 
   // ========== Gap Quick Wins: Profile Picture, Block/Unblock ==========

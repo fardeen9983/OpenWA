@@ -9,6 +9,7 @@ import type { LidMappingStore } from '../identity/lid-mapping-store.service';
  * pass `phoneNumber` when available (e.g. from `contacts.upsert` payloads that carry lid+pn pairs).
  */
 type BaileysContactWithPhone = BaileysContact & { phoneNumber?: string };
+type StoredChat = Chat & { id: string };
 
 interface LastMessage {
   key: WAMessageKey;
@@ -23,7 +24,7 @@ interface LastMessage {
  */
 export class BaileysSessionStore {
   private readonly contacts = new Map<string, BaileysContactWithPhone>();
-  private readonly chats = new Map<string, Chat>();
+  private readonly chats = new Map<string, StoredChat>();
   private readonly lastMessages = new Map<string, LastMessage>();
   private readonly lidToPn = new Map<string, string>();
   /**
@@ -55,9 +56,7 @@ export class BaileysSessionStore {
       const merged: BaileysContactWithPhone = { ...existing, ...r };
       this.contacts.set(r.id, merged);
       // Capture a lid->phone pair from the merged record (lid + phone can arrive in separate updates).
-      // The phone is `jid` on a Baileys Contact (`@s.whatsapp.net`); `phoneNumber` only appears on the
-      // WhatsApp Business event shape we extend in locally.
-      const phone = merged.phoneNumber ?? merged.jid;
+      const phone = merged.phoneNumber;
       if (merged.lid && phone) {
         this.lidToPn.set(merged.lid, phone);
         this.persistLidMapping(merged.lid, phone);
@@ -71,7 +70,7 @@ export class BaileysSessionStore {
         continue;
       }
       const existing = this.chats.get(r.id) ?? { id: r.id };
-      this.chats.set(r.id, { ...existing, ...r });
+      this.chats.set(r.id, { ...existing, ...r, id: r.id });
     }
   }
 
@@ -85,18 +84,23 @@ export class BaileysSessionStore {
   }
 
   /**
-   * Learn lid->pn mappings from an inbound message key (#362). Baileys attaches the sender's phone JID
-   * (`senderPn` / `participantPn`) next to its privacy id (`senderLid` / `participantLid`) on the message
-   * key — the only place a fresh `@lid` sender's number is revealed in @whiskeysockets/baileys@6.7.23
-   * (there is no `getPNForLID` lookup and `contacts.*` / `messaging-history.set` don't fire for it). This
-   * lets `resolvePhone` (senderPhone, `GET /contacts/:id/phone`) and lid canonicalization succeed. The
-   * pairs flow through addLidMappings, so they also write through to the persistent table.
+   * Learn lid->pn mappings from a Baileys v7 message key. Direct messages pair `remoteJid` with
+   * `remoteJidAlt`; group messages pair `participant` with `participantAlt`. Either side can be the LID.
    */
-  recordKeyLidMappings(key: Pick<WAMessageKey, 'senderLid' | 'senderPn' | 'participantLid' | 'participantPn'>): void {
-    this.addLidMappings([
-      { lid: key.senderLid ?? undefined, pn: key.senderPn ?? undefined },
-      { lid: key.participantLid ?? undefined, pn: key.participantPn ?? undefined },
-    ]);
+  recordKeyLidMappings(key: Pick<WAMessageKey, 'remoteJid' | 'remoteJidAlt' | 'participant' | 'participantAlt'>): void {
+    for (const [primary, alternate] of [
+      [key.remoteJid, key.remoteJidAlt],
+      [key.participant, key.participantAlt],
+    ]) {
+      if (!primary || !alternate) continue;
+      const primaryKind = parseWaId(primary).kind;
+      const alternateKind = parseWaId(alternate).kind;
+      if (primaryKind === 'lid' && alternateKind === 'user') {
+        this.addLidMappings([{ lid: primary, pn: alternate }]);
+      } else if (alternateKind === 'lid' && primaryKind === 'user') {
+        this.addLidMappings([{ lid: alternate, pn: primary }]);
+      }
+    }
   }
 
   /** Write a learned lid->phone pair through to the persistent table (bare digits, fire-and-forget). */
@@ -277,7 +281,7 @@ export class BaileysSessionStore {
     };
   }
 
-  private toNeutralChat(c: Chat): ChatSummary {
+  private toNeutralChat(c: StoredChat): ChatSummary {
     const last = this.lastMessages.get(c.id);
     return {
       id: this.toNeutralJid(c.id),

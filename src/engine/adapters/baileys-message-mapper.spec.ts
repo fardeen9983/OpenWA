@@ -9,6 +9,9 @@ describe('mapBaileysMessageType (baileys content-type -> neutral MessageType)', 
   it.each([
     ['conversation', false, 'text'],
     ['extendedTextMessage', false, 'text'],
+    ['buttonsResponseMessage', false, 'text'],
+    ['templateButtonReplyMessage', false, 'text'],
+    ['interactiveResponseMessage', false, 'text'],
     ['imageMessage', false, 'image'],
     ['videoMessage', false, 'video'],
     ['audioMessage', false, 'audio'],
@@ -139,5 +142,18 @@ describe('buildIncomingMessageFromBaileys', () => {
   it('omits ephemeralDuration when ephemeralDuration is 0', () => {
     const r = buildIncomingMessageFromBaileys({ ...base, ephemeralDuration: 0 });
     expect(r.ephemeralDuration).toBeUndefined();
+  });
+
+  it('carries a button reply when present', () => {
+    const r = buildIncomingMessageFromBaileys({
+      ...base,
+      contentType: 'buttonsResponseMessage',
+      body: 'Accept',
+      buttonReply: { id: 'accept', title: 'Accept' },
+    });
+
+    expect(r.type).toBe('text');
+    expect(r.body).toBe('Accept');
+    expect(r.buttonReply).toEqual({ id: 'accept', title: 'Accept' });
   });
 });

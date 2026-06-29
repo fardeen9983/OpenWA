@@ -1,5 +1,17 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNotEmpty, IsOptional, MaxLength, IsUrl, ValidateIf, IsArray } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  MaxLength,
+  IsUrl,
+  ValidateIf,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
 
 const MENTIONS_DESCRIPTION =
   'WIDs to @mention (e.g. ["62811@c.us"]). The text/caption must also contain the @<number> token.';
@@ -28,6 +40,69 @@ export class SendTextMessageDto {
   @IsArray()
   @IsString({ each: true })
   mentions?: string[];
+}
+
+export class SendButtonDto {
+  @ApiProperty({
+    description: 'Stable button identifier returned on inbound replies',
+    example: 'accept',
+    maxLength: 64,
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  id: string;
+
+  @ApiProperty({
+    description: 'Button label shown to the recipient',
+    example: 'Accept',
+    maxLength: 20,
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(20)
+  title: string;
+}
+
+export class SendButtonMessageDto {
+  @ApiProperty({
+    description: 'WhatsApp chat ID (phone@c.us for individual, groupId@g.us for groups)',
+    example: '917069567007@c.us',
+  })
+  @IsString()
+  @IsNotEmpty()
+  chatId: string;
+
+  @ApiProperty({
+    description: 'Message content displayed above the buttons',
+    example: 'Neha wants to connect with you',
+    maxLength: 1024,
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(1024)
+  text: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional footer displayed under the message',
+    example: 'ContactBook',
+    maxLength: 60,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  footer?: string;
+
+  @ApiProperty({
+    description: 'Reply buttons. Baileys supports a small button set; keep this POC to 1-3 buttons.',
+    type: [SendButtonDto],
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(3)
+  @ValidateNested({ each: true })
+  @Type(() => SendButtonDto)
+  buttons: SendButtonDto[];
 }
 
 export class SendMediaMessageDto {

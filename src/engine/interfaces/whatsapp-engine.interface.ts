@@ -28,6 +28,17 @@ export interface MessageResult {
   timestamp: number;
 }
 
+export interface ButtonReply {
+  id: string;
+  title: string;
+}
+
+export interface ButtonMessageInput {
+  text: string;
+  footer?: string;
+  buttons: ButtonReply[];
+}
+
 export interface MediaInput {
   mimetype: string;
   data: Buffer | string; // Buffer or base64 or URL
@@ -116,6 +127,7 @@ export interface IncomingMessage {
     address?: string;
     url?: string;
   };
+  buttonReply?: ButtonReply;
 }
 
 /**
@@ -337,6 +349,10 @@ export type ChatState = 'typing' | 'recording' | 'paused';
  */
 export type DeliveryStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
 
+export interface DeliveryFailureDetails {
+  errorCode?: string;
+}
+
 /**
  * Structured payload for a remotely-revoked ("deleted for everyone") message.
  * The engine layer never emits a localized display string; `body` is intentionally
@@ -372,7 +388,7 @@ export interface EngineEventCallbacks {
    * Fired when the delivery status of an outgoing message advances. The adapter maps its native
    * delivery signal to the neutral `DeliveryStatus`, so consumers never see engine-specific codes.
    */
-  onMessageAck?: (messageId: string, status: DeliveryStatus) => void;
+  onMessageAck?: (messageId: string, status: DeliveryStatus, details?: DeliveryFailureDetails) => void;
   onMessageRevoked?: (message: RevokedMessage) => void;
   onMessageReaction?: (event: ReactionEvent) => void;
   /**
@@ -413,6 +429,7 @@ export interface IWhatsAppEngine {
 
   // Messaging - Basic
   sendTextMessage(chatId: string, text: string, mentions?: string[]): Promise<MessageResult>;
+  sendButtonMessage(chatId: string, input: ButtonMessageInput): Promise<MessageResult>;
   sendImageMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
   sendVideoMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
   sendAudioMessage(chatId: string, media: MediaInput): Promise<MessageResult>;

@@ -549,7 +549,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     });
 
     const engine = this.engineFactory.create({
-      sessionId: session.name,
+      sessionId: id,
       proxyUrl: session.proxyUrl || undefined,
       proxyType: session.proxyType || undefined,
     });
@@ -793,7 +793,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
           })
           .catch(err => this.logger.error(`onMessageCreate handler failed for ${id}`, String(err)));
       },
-      onMessageAck: (messageId, status: DeliveryStatus): void => {
+      onMessageAck: (messageId, status: DeliveryStatus, details): void => {
         if (!this.isLiveEngine(id, engine)) return;
         this.logger.debug(`Message ack: ${messageId} -> ${status}`, {
           sessionId: id,
@@ -853,7 +853,13 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         // against either channel sees the same shape. `id` mirrors the field every other message.*
         // event carries (and the idempotency-key resolver reads). `ack` is a deprecated legacy field
         // kept for backward compatibility — new consumers should read the neutral `status`.
-        const ackPayload = { id: messageId, messageId, status, ack: deliveryStatusToAck(status) };
+        const ackPayload = {
+          id: messageId,
+          messageId,
+          status,
+          ack: deliveryStatusToAck(status),
+          ...(details?.errorCode ? { errorCode: details.errorCode } : {}),
+        };
 
         // Push the live delivery/read tick to the dashboard over the websocket.
         this.eventsGateway.emitMessageAck(id, ackPayload);
@@ -876,7 +882,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         // stays reserved for send-time send failures, which carry a distinct `{ error, input }` payload.
         void this.hookManager.execute(
           'message:ack',
-          { messageId, status, ack: deliveryStatusToAck(status) },
+          { messageId, status, ack: deliveryStatusToAck(status), ...details },
           { sessionId: id, source: 'Engine' },
         );
       },

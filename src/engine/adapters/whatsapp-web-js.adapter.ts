@@ -7,6 +7,7 @@ import {
   IWhatsAppEngine,
   EngineStatus,
   EngineEventCallbacks,
+  ButtonMessageInput,
   MessageResult,
   MediaInput,
   IncomingMessage,
@@ -775,6 +776,12 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       id: msg.id._serialized,
       timestamp: msg.timestamp,
     };
+  }
+
+  sendButtonMessage(chatId: string, input: ButtonMessageInput): Promise<MessageResult> {
+    void chatId;
+    void input;
+    return Promise.reject(new EngineNotSupportedError('sendButtonMessage is only supported by the baileys engine'));
   }
 
   async sendImageMessage(chatId: string, media: MediaInput): Promise<MessageResult> {

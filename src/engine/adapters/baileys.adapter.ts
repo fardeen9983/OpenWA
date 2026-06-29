@@ -2,7 +2,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as qrcode from 'qrcode';
 import type * as BaileysLib from '@whiskeysockets/baileys';
-import type { AnyMessageContent, MiscMessageGenerationOptions, WAMessage, WASocket } from '@whiskeysockets/baileys';
+import {
+  generateWAMessageFromContent,
+  proto,
+  type AnyMessageContent,
+  type MiscMessageGenerationOptions,
+  type WAMessage,
+  type WAMessageContent,
+  type WASocket,
+} from '@whiskeysockets/baileys';
 import { buildIncomingMessageFromBaileys, mapBaileysStatus } from './baileys-message-mapper';
 import { mapBaileysGroup, mapBaileysGroupInfo } from './baileys-group-mapper';
 import type { ILogger } from '@whiskeysockets/baileys/lib/Utils/logger.js';
@@ -11,6 +19,7 @@ import {
   Channel,
   ChannelMessage,
   Catalog,
+  ButtonMessageInput,
   Contact,
   ContactCard,
   EngineEventCallbacks,
@@ -54,7 +63,9 @@ import {
 import { ConcurrencyLimiter } from './concurrency-limiter';
 
 /** Linked-device identity shown in WhatsApp (Settings → Linked Devices). */
-const BAILEYS_BROWSER: [string, string, string] = ['OpenWA', 'Chrome', '120.0.0'];
+const BAILEYS_BROWSER: [string, string, string] = ['Ubuntu', 'Chrome', '22.04.4'];
+
+type BaileysAckErrorAttrs = { id?: string; from?: string; error?: string; class?: string; t?: string };
 
 /** Fully silent logger so Baileys does not spam stdout; diagnostics flow via connection.update. */
 function createSilentLogger(): BaileysLogger {
@@ -80,20 +91,35 @@ const BAILEYS_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error'];
  * JSON lines to stdout (context "baileys-wire") independent of the app log level, so a run can be
  * captured with `BAILEYS_LOG_LEVEL=trace node dist/main > baileys-wire.log`.
  */
-function createBaileysLogger(): BaileysLogger {
-  const configured = (process.env.BAILEYS_LOG_LEVEL ?? 'silent').toLowerCase();
-  if (!BAILEYS_LOG_LEVELS.includes(configured)) {
+function createBaileysLogger(onAckError?: (attrs: BaileysAckErrorAttrs) => void): BaileysLogger {
+  const configuredRaw = (process.env.BAILEYS_LOG_LEVEL ?? 'silent').toLowerCase();
+  const configured = BAILEYS_LOG_LEVELS.includes(configuredRaw) ? configuredRaw : 'silent';
+  if (configured === 'silent' && !onAckError) {
     return createSilentLogger();
   }
-  const threshold = BAILEYS_LOG_LEVELS.indexOf(configured);
+  const threshold = configured === 'silent' ? Number.POSITIVE_INFINITY : BAILEYS_LOG_LEVELS.indexOf(configured);
   const write =
     (lvl: string) =>
     (obj: unknown, msg?: string): void => {
+      const rec: Record<string, unknown> =
+        typeof obj === 'string' ? { msg: obj } : { ...(obj as Record<string, unknown>), ...(msg ? { msg } : {}) };
+      if (lvl === 'warn' && rec.msg === 'received error in ack' && typeof rec.attrs === 'object' && rec.attrs) {
+        onAckError?.(rec.attrs);
+      }
+      if (
+        lvl === 'warn' &&
+        rec.msg === 'error 463: account restricted or missing tctoken for contact' &&
+        typeof rec.msgId === 'string'
+      ) {
+        onAckError?.({
+          id: rec.msgId,
+          from: typeof rec.from === 'string' ? rec.from : undefined,
+          error: '463',
+        });
+      }
       if (BAILEYS_LOG_LEVELS.indexOf(lvl) < threshold) {
         return;
       }
-      const rec =
-        typeof obj === 'string' ? { msg: obj } : { ...(obj as Record<string, unknown>), ...(msg ? { msg } : {}) };
       process.stdout.write(
         JSON.stringify({ ts: new Date().toISOString(), level: lvl, context: 'baileys-wire', ...rec }) + '\n',
       );
@@ -201,12 +227,13 @@ export class BaileysAdapter implements IWhatsAppEngine {
         previous.ev.removeAllListeners('creds.update');
         previous.ev.removeAllListeners('messages.upsert');
         previous.ev.removeAllListeners('messages.update');
+        previous.ev.removeAllListeners('message-receipt.update');
         previous.ev.removeAllListeners('contacts.upsert');
         previous.ev.removeAllListeners('contacts.update');
         previous.ev.removeAllListeners('chats.upsert');
         previous.ev.removeAllListeners('chats.update');
         previous.ev.removeAllListeners('messaging-history.set');
-        previous.end(undefined);
+        void previous.end(undefined);
       } catch {
         // end() may already have run from Baileys' own close handler — a safe no-op.
       }
@@ -228,7 +255,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       // BaileysLogger matches ILogger exactly; cast needed because the module resolves
       // the type through a deep import path that TypeScript does not auto-unify here.
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-      logger: createBaileysLogger() as unknown as ILogger,
+      logger: createBaileysLogger(attrs => this.handleAckError(attrs)) as unknown as ILogger,
     });
     this.sock = sock;
 
@@ -236,6 +263,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
     sock.ev.on('connection.update', update => this.handleConnectionUpdate(update));
     sock.ev.on('messages.upsert', event => this.handleMessagesUpsert(event));
     sock.ev.on('messages.update', updates => this.handleMessagesUpdate(updates));
+    sock.ev.on('message-receipt.update', updates => this.handleMessageReceiptUpdate(updates));
     sock.ev.on('contacts.upsert', contacts => {
       this.logContactEvent('contacts.upsert', contacts);
       this.sessionStore.upsertContacts(contacts);
@@ -279,8 +307,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
         lidPnMappings: lidPnMappings?.length ?? 0,
       });
     });
-    // WhatsApp pushes this when a lid contact shares its phone number - a direct lid->phone pair.
-    sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => this.sessionStore.addLidMappings([{ lid, pn: jid }]));
+    sock.ev.on('lid-mapping.update', mapping => this.sessionStore.addLidMappings([mapping]));
   }
 
   private handleConnectionUpdate(update: {
@@ -379,7 +406,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
-    this.sock?.end(undefined);
+    void this.sock?.end(undefined);
     this.sock = null;
     this.setStatus(EngineStatus.DISCONNECTED);
     return Promise.resolve();
@@ -397,7 +424,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       this.logger.warn('Baileys logout failed; ending socket', {
         error: err instanceof Error ? err.message : String(err),
       });
-      this.sock?.end(undefined);
+      void this.sock?.end(undefined);
     }
     this.sock = null;
     this.setStatus(EngineStatus.DISCONNECTED);
@@ -429,7 +456,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
-    this.sock?.end(undefined);
+    void this.sock?.end(undefined);
     this.sock = null;
     this.setStatus(EngineStatus.DISCONNECTED);
     return Promise.resolve();
@@ -470,11 +497,10 @@ export class BaileysAdapter implements IWhatsAppEngine {
 
   async sendTextMessage(chatId: string, text: string, mentions?: string[]): Promise<MessageResult> {
     this.ensureReady();
-    const options = this.withEphemeral(chatId);
+    const jid = this.sessionStore.toEngineJid(chatId);
+    const options = this.withEphemeral(chatId, { useUserDevicesCache: false } as MiscMessageGenerationOptions);
     const content = { text, ...this.withMentions(mentions) };
-    const sent = options
-      ? await this.sock!.sendMessage(chatId, content, options)
-      : await this.sock!.sendMessage(chatId, content);
+    const sent = await this.sock!.sendMessage(jid, content, options);
     if (sent) {
       void this.config.messageStore?.put(this.config.sessionId, sent).catch(err =>
         this.logger.warn('Failed to persist sent message to store', {
@@ -486,6 +512,45 @@ export class BaileysAdapter implements IWhatsAppEngine {
       id: sent?.key?.id ?? '',
       timestamp: this.toUnixSeconds(sent?.messageTimestamp),
     };
+  }
+
+  async sendButtonMessage(chatId: string, input: ButtonMessageInput): Promise<MessageResult> {
+    this.ensureReady();
+    const jid = this.sessionStore.toEngineJid(chatId);
+    const content: WAMessageContent = {
+      viewOnceMessage: {
+        message: {
+          messageContextInfo: {
+            deviceListMetadata: {},
+            deviceListMetadataVersion: 2,
+          },
+          interactiveMessage: {
+            body: { text: input.text },
+            footer: input.footer ? { text: input.footer } : undefined,
+            nativeFlowMessage: {
+              buttons: input.buttons.map(button => ({
+                name: 'quick_reply',
+                buttonParamsJson: JSON.stringify({
+                  display_text: button.title,
+                  id: button.id,
+                }),
+              })),
+              messageVersion: 1,
+            },
+          },
+        },
+      },
+    };
+    const message = generateWAMessageFromContent(jid, proto.Message.fromObject(content), {
+      userJid: this.sock?.user?.id ?? '',
+    });
+    await this.sock!.relayMessage(jid, message.message!, { messageId: message.key.id! });
+    void this.config.messageStore?.put(this.config.sessionId, message).catch(err =>
+      this.logger.warn('Failed to persist sent button message to store', {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    return { id: message.key.id ?? '', timestamp: this.toUnixSeconds(message.messageTimestamp) };
   }
 
   async checkNumberExists(number: string): Promise<boolean> {
@@ -505,7 +570,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
   async sendChatState(chatId: string, state: ChatState): Promise<void> {
     this.ensureReady();
     const presence = state === 'typing' ? 'composing' : state === 'recording' ? 'recording' : 'paused';
-    await this.sock!.sendPresenceUpdate(presence, chatId);
+    await this.sock!.sendPresenceUpdate(presence, this.sessionStore.toEngineJid(chatId));
   }
 
   async sendImageMessage(chatId: string, media: MediaInput): Promise<MessageResult> {
@@ -588,7 +653,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
   async reactToMessage(chatId: string, messageId: string, emoji: string): Promise<void> {
     this.ensureReady();
     const target = await this.requireStored(messageId);
-    await this.sock!.sendMessage(chatId, { react: { text: emoji, key: target.key } });
+    await this.sock!.sendMessage(this.sessionStore.toEngineJid(chatId), { react: { text: emoji, key: target.key } });
   }
 
   async deleteMessage(chatId: string, messageId: string, forEveryone = true): Promise<void> {
@@ -598,7 +663,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       throw new EngineNotSupportedError('deleteMessage (delete-for-me)');
     }
     const target = await this.requireStored(messageId);
-    await this.sock!.sendMessage(chatId, { delete: target.key });
+    await this.sock!.sendMessage(this.sessionStore.toEngineJid(chatId), { delete: target.key });
   }
 
   // ----- Groups -----
@@ -989,10 +1054,73 @@ export class BaileysAdapter implements IWhatsAppEngine {
   }
 
   private handleMessagesUpdate(
-    updates: Array<{ key?: { id?: string | null }; update?: { status?: number | null } }>,
+    updates: Array<{
+      key?: { id?: string | null; remoteJid?: string | null; fromMe?: boolean | null; participant?: string | null };
+      update?: { status?: number | null };
+    }>,
   ): void {
     for (const u of updates) {
-      const status = mapBaileysStatus(u.update?.status);
+      const rawStatus = u.update?.status;
+      const status = mapBaileysStatus(rawStatus);
+      this.logger.log('Baileys message status update', {
+        action: 'baileys_message_status',
+        sessionId: this.config.sessionId,
+        messageId: u.key?.id ?? undefined,
+        remoteJid: u.key?.remoteJid ?? undefined,
+        fromMe: u.key?.fromMe,
+        participant: u.key?.participant ?? undefined,
+        rawStatus,
+        status,
+      });
+      if (rawStatus === 0) {
+        this.logger.warn('Baileys reported an outbound message error', {
+          action: 'baileys_message_error',
+          sessionId: this.config.sessionId,
+          messageId: u.key?.id ?? undefined,
+          remoteJid: u.key?.remoteJid ?? undefined,
+          fromMe: u.key?.fromMe,
+          participant: u.key?.participant ?? undefined,
+        });
+      }
+      if (status && u.key?.id) {
+        this.callbacks.onMessageAck?.(u.key.id, status);
+      }
+    }
+  }
+
+  private handleAckError(attrs: BaileysAckErrorAttrs): void {
+    this.logger.warn('Baileys reported an outbound message ack error', {
+      action: 'baileys_message_ack_error',
+      sessionId: this.config.sessionId,
+      messageId: attrs.id,
+      remoteJid: attrs.from,
+      errorCode: attrs.error,
+      messageClass: attrs.class,
+      timestamp: attrs.t,
+    });
+    if (attrs.id) {
+      this.callbacks.onMessageAck?.(attrs.id, 'failed', attrs.error ? { errorCode: attrs.error } : undefined);
+    }
+  }
+
+  private handleMessageReceiptUpdate(
+    updates: Array<{
+      key?: { id?: string | null; remoteJid?: string | null; fromMe?: boolean | null; participant?: string | null };
+      receipt?: { userJid?: string | null; receiptTimestamp?: unknown; readTimestamp?: unknown };
+    }>,
+  ): void {
+    for (const u of updates) {
+      const status = u.receipt?.readTimestamp ? 'read' : u.receipt?.receiptTimestamp ? 'delivered' : null;
+      this.logger.log('Baileys message receipt update', {
+        action: 'baileys_message_receipt',
+        sessionId: this.config.sessionId,
+        messageId: u.key?.id ?? undefined,
+        remoteJid: u.key?.remoteJid ?? undefined,
+        fromMe: u.key?.fromMe,
+        participant: u.key?.participant ?? undefined,
+        userJid: u.receipt?.userJid ?? undefined,
+        status,
+      });
       if (status && u.key?.id) {
         this.callbacks.onMessageAck?.(u.key.id, status);
       }
@@ -1045,8 +1173,11 @@ export class BaileysAdapter implements IWhatsAppEngine {
     const b = await this.loadLib();
     const content = msg.message ?? {};
 
+    const buttonReply = this.extractButtonReply(content);
+
     // Body: text first, then media caption as fallback.
     const body =
+      buttonReply?.title ??
       content.conversation ??
       content.extendedTextMessage?.text ??
       content.imageMessage?.caption ??
@@ -1210,9 +1341,70 @@ export class BaileysAdapter implements IWhatsAppEngine {
         location,
         quotedMessage,
         ephemeralDuration: contextInfo?.expiration ?? undefined,
+        buttonReply,
       },
       jid => this.sessionStore.toNeutralJid(jid),
     );
+  }
+
+  private extractButtonReply(content: NonNullable<WAMessage['message']>): IncomingMessage['buttonReply'] {
+    const raw = content as {
+      buttonsResponseMessage?: { selectedButtonId?: string | null; selectedDisplayText?: string | null };
+      templateButtonReplyMessage?: { selectedId?: string | null; selectedDisplayText?: string | null };
+      interactiveResponseMessage?: {
+        nativeFlowResponseMessage?: {
+          name?: string | null;
+          paramsJson?: string | null;
+        } | null;
+        body?: { text?: string | null } | null;
+      };
+    };
+    const buttonsResponse = raw.buttonsResponseMessage;
+    if (buttonsResponse?.selectedButtonId || buttonsResponse?.selectedDisplayText) {
+      return {
+        id: buttonsResponse.selectedButtonId ?? buttonsResponse.selectedDisplayText ?? '',
+        title: buttonsResponse.selectedDisplayText ?? buttonsResponse.selectedButtonId ?? '',
+      };
+    }
+
+    const templateReply = raw.templateButtonReplyMessage;
+    if (templateReply?.selectedId || templateReply?.selectedDisplayText) {
+      return {
+        id: templateReply.selectedId ?? templateReply.selectedDisplayText ?? '',
+        title: templateReply.selectedDisplayText ?? templateReply.selectedId ?? '',
+      };
+    }
+
+    const interactive = raw.interactiveResponseMessage;
+    const nativeFlow = interactive?.nativeFlowResponseMessage;
+    if (nativeFlow?.paramsJson || nativeFlow?.name || interactive?.body?.text) {
+      const parsed = this.parseNativeFlowButtonReply(nativeFlow?.paramsJson);
+      const id = parsed?.id ?? parsed?.selectedId ?? nativeFlow?.name ?? interactive?.body?.text ?? '';
+      const title = parsed?.title ?? parsed?.displayText ?? interactive?.body?.text ?? id;
+      return { id, title };
+    }
+
+    return undefined;
+  }
+
+  private parseNativeFlowButtonReply(
+    paramsJson: string | null | undefined,
+  ): { id?: string; selectedId?: string; title?: string; displayText?: string } | null {
+    if (!paramsJson) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(paramsJson) as Record<string, unknown>;
+      const id = this.firstString(parsed.id, parsed.selectedId, parsed.button_id);
+      const title = this.firstString(parsed.title, parsed.displayText, parsed.button_text);
+      return { id, selectedId: id, title, displayText: title };
+    } catch {
+      return null;
+    }
+  }
+
+  private firstString(...values: unknown[]): string | undefined {
+    return values.find((value): value is string => typeof value === 'string');
   }
 
   /**
@@ -1374,10 +1566,11 @@ export class BaileysAdapter implements IWhatsAppEngine {
     content: AnyMessageContent,
     options?: MiscMessageGenerationOptions,
   ): Promise<MessageResult> {
+    const jid = this.sessionStore.toEngineJid(chatId);
     const merged = this.withEphemeral(chatId, options);
     const sent = merged
-      ? await this.sock!.sendMessage(chatId, content, merged)
-      : await this.sock!.sendMessage(chatId, content);
+      ? await this.sock!.sendMessage(jid, content, merged)
+      : await this.sock!.sendMessage(jid, content);
     if (sent) {
       void this.config.messageStore?.put(this.config.sessionId, sent).catch(err =>
         this.logger.warn('Failed to persist sent message to store', {

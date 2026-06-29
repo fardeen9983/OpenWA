@@ -16,6 +16,7 @@ const mockEngineResult = { id: 'wa-msg-1', timestamp: 1706868000 };
 function createMockEngine() {
   return {
     sendTextMessage: jest.fn().mockResolvedValue(mockEngineResult),
+    sendButtonMessage: jest.fn().mockResolvedValue(mockEngineResult),
     sendImageMessage: jest.fn().mockResolvedValue(mockEngineResult),
     sendVideoMessage: jest.fn().mockResolvedValue(mockEngineResult),
     sendAudioMessage: jest.fn().mockResolvedValue(mockEngineResult),
@@ -186,6 +187,46 @@ describe('MessageService', () => {
 
       await expect(service.sendText('inactive', { chatId: 'test@c.us', text: 'hello' })).rejects.toThrow(
         BadRequestException,
+      );
+    });
+  });
+
+  describe('sendButtons', () => {
+    it('sends a button message and persists it as an outgoing text message with button metadata', async () => {
+      const result = await service.sendButtons('sess-1', {
+        chatId: '917069567007@c.us',
+        text: 'Neha wants to connect with you',
+        footer: 'ContactBook',
+        buttons: [
+          { id: 'accept', title: 'Accept' },
+          { id: 'decline', title: 'Decline' },
+        ],
+      });
+
+      expect(result).toEqual({ messageId: 'wa-msg-1', timestamp: 1706868000 });
+      expect(mockEngine.sendButtonMessage).toHaveBeenCalledWith('917069567007@c.us', {
+        text: 'Neha wants to connect with you',
+        footer: 'ContactBook',
+        buttons: [
+          { id: 'accept', title: 'Accept' },
+          { id: 'decline', title: 'Decline' },
+        ],
+      });
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'sess-1',
+          direction: MessageDirection.OUTGOING,
+          chatId: '917069567007@c.us',
+          body: 'Neha wants to connect with you',
+          type: 'text',
+          metadata: {
+            footer: 'ContactBook',
+            buttons: [
+              { id: 'accept', title: 'Accept' },
+              { id: 'decline', title: 'Decline' },
+            ],
+          },
+        }),
       );
     });
   });

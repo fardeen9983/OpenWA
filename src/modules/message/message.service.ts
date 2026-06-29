@@ -2,7 +2,7 @@ import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SessionService } from '../session/session.service';
-import { SendTextMessageDto, SendMediaMessageDto, MessageResponseDto } from './dto';
+import { SendTextMessageDto, SendButtonMessageDto, SendMediaMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
 import { assertBase64WithinMediaCap } from './media-cap.util';
 import { MediaInput, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
@@ -14,6 +14,7 @@ import { createLogger } from '../../common/services/logger.service';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
 import { userPart } from '../../engine/identity/wa-id';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 
 export interface GetMessagesOptions {
   chatId?: string;
@@ -118,6 +119,38 @@ export class MessageService {
     const text = segments.join('\n\n');
 
     return this.sendText(sessionId, { chatId: dto.chatId, text });
+  }
+
+  async sendButtons(sessionId: string, dto: SendButtonMessageDto): Promise<MessageResponseDto> {
+    const engine = this.getEngine(sessionId);
+    const message = await this.saveOutgoingMessage(sessionId, {
+      chatId: dto.chatId,
+      body: dto.text,
+      type: 'text',
+      metadata: { buttons: dto.buttons, footer: dto.footer },
+    });
+
+    try {
+      const result = await engine.sendButtonMessage(dto.chatId, {
+        text: dto.text,
+        footer: dto.footer,
+        buttons: dto.buttons,
+      });
+
+      message.waMessageId = result.id;
+      message.status = MessageStatus.SENT;
+      message.timestamp = result.timestamp;
+      await this.messageRepository.save(message);
+
+      return {
+        messageId: result.id,
+        timestamp: result.timestamp,
+      };
+    } catch (error) {
+      message.status = MessageStatus.FAILED;
+      await this.messageRepository.save(message);
+      throw this.toClientFacingError(error);
+    }
   }
 
   async sendImage(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
@@ -642,6 +675,9 @@ export class MessageService {
    */
   private toClientFacingError(error: unknown): unknown {
     if (error instanceof SsrfBlockedError) {
+      return new BadRequestException(error.message);
+    }
+    if (error instanceof EngineNotSupportedError) {
       return new BadRequestException(error.message);
     }
     return error;

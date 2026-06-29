@@ -1,8 +1,7 @@
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { SendTextMessageDto, SendMediaMessageDto } from './send-message.dto';
+import { SendButtonMessageDto, SendMediaMessageDto, SendTextMessageDto } from './send-message.dto';
 
-// Mirror the global ValidationPipe (main.ts): whitelist + forbidNonWhitelisted strip/reject unknown props.
 const validateDto = (cls: new () => object, obj: unknown) =>
   validate(plainToInstance(cls, obj), { whitelist: true, forbidNonWhitelisted: true });
 
@@ -16,12 +15,11 @@ describe('SendTextMessageDto mentions', () => {
     expect(errors).toHaveLength(0);
   });
 
-  it('is omittable (mentions stays optional)', async () => {
-    const errors = await validateDto(SendTextMessageDto, { chatId: 'g@g.us', text: 'hi' });
-    expect(errors).toHaveLength(0);
+  it('is omittable', async () => {
+    await expect(validateDto(SendTextMessageDto, { chatId: 'g@g.us', text: 'hi' })).resolves.toHaveLength(0);
   });
 
-  it('rejects a non-string element in mentions', async () => {
+  it('rejects a non-string mention', async () => {
     const errors = await validateDto(SendTextMessageDto, {
       chatId: 'g@g.us',
       text: 'hi',
@@ -40,5 +38,49 @@ describe('SendMediaMessageDto mentions', () => {
       mentions: ['62811@c.us'],
     });
     expect(errors).toHaveLength(0);
+  });
+});
+
+describe('SendButtonMessageDto', () => {
+  const validateButtons = (obj: object) => validateDto(SendButtonMessageDto, obj);
+
+  it('accepts a valid button message payload', async () => {
+    const errors = await validateButtons({
+      chatId: '917069567007@c.us',
+      text: 'Neha wants to connect with you',
+      footer: 'ContactBook',
+      buttons: [
+        { id: 'accept', title: 'Accept' },
+        { id: 'decline', title: 'Decline' },
+      ],
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('requires one to three buttons', async () => {
+    await expect(
+      validateButtons({ chatId: '917069567007@c.us', text: 'Invite', buttons: [] }),
+    ).resolves.not.toHaveLength(0);
+    await expect(
+      validateButtons({
+        chatId: '917069567007@c.us',
+        text: 'Invite',
+        buttons: [
+          { id: 'one', title: 'One' },
+          { id: 'two', title: 'Two' },
+          { id: 'three', title: 'Three' },
+          { id: 'four', title: 'Four' },
+        ],
+      }),
+    ).resolves.not.toHaveLength(0);
+  });
+
+  it('rejects unknown fields on buttons', async () => {
+    const errors = await validateButtons({
+      chatId: '917069567007@c.us',
+      text: 'Invite',
+      buttons: [{ id: 'accept', title: 'Accept', url: 'https://example.com' }],
+    });
+    expect(errors).not.toHaveLength(0);
   });
 });

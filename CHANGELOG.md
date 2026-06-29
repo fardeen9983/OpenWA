@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ContactBook Baileys compatibility.** Added Baileys v7 JID/LID normalization, trust-token-safe text sends, button-message support, normalized button replies, and delivery failure-code propagation for ContactBook webhooks.
+
+### Fixed
+
+- **Static contact routes are matched before `:contactId`.** Number checks and phone-resolution endpoints no longer get swallowed by the dynamic contact route.
+- **Structured logs redact secret-named fields.** Passwords, tokens, API keys, and credentials are recursively redacted before log output.
+
 ## [0.7.14] - 2026-06-30
 
 ### Added

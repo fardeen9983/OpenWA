@@ -9,6 +9,9 @@ export function mapBaileysMessageType(contentType: string | undefined, isPtt = f
   switch (contentType) {
     case 'conversation':
     case 'extendedTextMessage':
+    case 'buttonsResponseMessage':
+    case 'templateButtonReplyMessage':
+    case 'interactiveResponseMessage':
       return 'text';
     case 'imageMessage':
       return 'image';
@@ -85,6 +88,8 @@ export interface BaileysIncomingFields {
   quotedMessage?: IncomingMessage['quotedMessage'];
   /** Ephemeral/disappearing-messages timer from `contextInfo.expiration` on the Baileys message. */
   ephemeralDuration?: number;
+  /** Pre-extracted button reply. Populated by the adapter for button/interactive responses. */
+  buttonReply?: IncomingMessage['buttonReply'];
 }
 
 /**
@@ -148,6 +153,10 @@ export function buildIncomingMessageFromBaileys(
   // Ephemeral/disappearing-messages timer, when the chat has one set.
   if (fields.ephemeralDuration && fields.ephemeralDuration > 0) {
     incoming.ephemeralDuration = fields.ephemeralDuration;
+  }
+
+  if (fields.buttonReply) {
+    incoming.buttonReply = fields.buttonReply;
   }
 
   return incoming;

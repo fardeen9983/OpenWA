@@ -2,7 +2,7 @@ import { Controller, Post, Get, Param, Body, Query, HttpCode, HttpStatus } from 
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { MessageService } from './message.service';
 import { BulkMessageService } from './bulk-message.service';
-import { SendTextMessageDto, SendMediaMessageDto, MessageResponseDto } from './dto';
+import { SendTextMessageDto, SendButtonMessageDto, SendMediaMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
 import { SendBulkMessageDto, BulkMessageResponseDto } from './dto/bulk-message.dto';
 import {
@@ -91,6 +91,27 @@ export class MessageController {
     @Body() dto: SendTemplateMessageDto,
   ): Promise<MessageResponseDto> {
     return this.messageService.sendTemplate(sessionId, dto);
+  }
+
+  @Post('send-buttons')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @ApiOperation({ summary: 'Send a message with reply buttons' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Button message sent',
+    type: MessageResponseDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Session not active, engine does not support buttons, or invalid request',
+  })
+  @ApiResponse({ status: 404, description: 'Session not found' })
+  async sendButtons(
+    @Param('sessionId') sessionId: string,
+    @Body() dto: SendButtonMessageDto,
+  ): Promise<MessageResponseDto> {
+    return this.messageService.sendButtons(sessionId, dto);
   }
 
   @Post('send-image')
